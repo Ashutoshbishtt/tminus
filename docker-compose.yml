@@ -1,0 +1,160 @@
+# Local stack for tminus. Everything the services need to run on one laptop.
+#
+# The whole thing is sized for an 8 GB machine, so every container has a memory
+# limit and Kafka's heap is capped. If something starts getting killed, the
+# limits below are the first place to look.
+#
+#   make up      start it
+#   make ps      see what is healthy
+#   make down    stop it
+#   make reset   stop it and throw the data away
+#
+# The management UIs are behind a profile so they only run when asked for:
+#   make tools
+
+name: tminus
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: tminus-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tminus
+      POSTGRES_PASSWORD: tminus
+      POSTGRES_DB: tminus
+      # Speeds up the initial cluster creation a little.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tminus -d tminus"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    mem_limit: 512m
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: tminus-redis
+    restart: unless-stopped
+    # Redis holds the geo index and cache. It is throwaway data that can always be
+    # rebuilt from Kafka, so persistence is light on purpose. noeviction means a
+    # full Redis fails loudly instead of quietly dropping riders.
+    command: >
+      redis-server
+      --save 60 1
+      --maxmemory 200mb
+      --maxmemory-policy noeviction
+      --loglevel notice
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    mem_limit: 256m
+
+  kafka:
+    image: apache/kafka:4.0.0
+    container_name: tminus-kafka
+    restart: unless-stopped
+    # Single node in KRaft mode, so this one container is both broker and
+    # controller. No ZooKeeper, which Kafka 4 dropped entirely.
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
+
+      # Two ways in: containers use kafka:19092, my laptop uses localhost:9092.
+      KAFKA_LISTENERS: INTERNAL://:19092,HOST://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+
+      # One node, so nothing can be replicated. Fine locally, and it keeps the
+      # internal topics from sitting under-replicated forever.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+
+      # Three partitions by default so consumer groups and rebalancing are
+      # actually visible with more than one consumer running.
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+      # Location data is a firehose and only useful for a short while.
+      KAFKA_LOG_RETENTION_HOURS: 24
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+
+      # The JVM will happily take a gigabyte if left alone. This laptop has 8 GB.
+      KAFKA_HEAP_OPTS: "-Xmx512m -Xms256m"
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+    mem_limit: 1200m
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    container_name: tminus-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: tminus
+      RABBITMQ_DEFAULT_PASS: tminus
+    ports:
+      - "5672:5672"    # the broker
+      - "15672:15672"  # the management UI, http://localhost:15672
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    mem_limit: 512m
+
+  # ---------------------------------------------------------------------------
+  # Optional. Started only with `make tools`, because on 8 GB every container
+  # counts and these are just for looking at things.
+  # ---------------------------------------------------------------------------
+
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:latest
+    container_name: tminus-kafka-ui
+    profiles: ["tools"]
+    restart: unless-stopped
+    environment:
+      KAFKA_CLUSTERS_0_NAME: tminus
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:19092
+      DYNAMIC_CONFIG_ENABLED: "true"
+      JAVA_OPTS: "-Xmx256m"
+    ports:
+      - "8080:8080"    # http://localhost:8080
+    depends_on:
+      kafka:
+        condition: service_healthy
+    mem_limit: 512m
+
+volumes:
+  postgres-data:
+  redis-data:
+  kafka-data:
+  rabbitmq-data:
