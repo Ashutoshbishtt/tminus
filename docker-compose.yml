@@ -93,7 +93,10 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
 
-      # Location data is a firehose and only useful for a short while.
+      # Location data is a firehose and only useful for a short while. This is the
+      # cluster default, so it lands on every topic including order.events, which
+      # is meant to be replayable. Day 14 sets a longer retention on that topic
+      # when it creates it.
       KAFKA_LOG_RETENTION_HOURS: 24
       KAFKA_LOG_DIRS: /var/lib/kafka/data
 
@@ -137,7 +140,7 @@ services:
   # ---------------------------------------------------------------------------
 
   kafka-ui:
-    image: ghcr.io/kafbat/kafka-ui:latest
+    image: ghcr.io/kafbat/kafka-ui:v1.4.2
     container_name: tminus-kafka-ui
     profiles: ["tools"]
     restart: unless-stopped
