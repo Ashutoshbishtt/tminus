@@ -1,0 +1,38 @@
+# Runs the same three things `make check` runs, on every push and pull request.
+# If it is not green here, it does not get merged.
+
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: formatting
+        # go fmt would rewrite the files and pass. This fails instead, and says
+        # which files are wrong.
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        # The race detector, because the whole project is about concurrency and a
+        # race that only shows up on the laptop once a week is not worth having.
+        run: go test -race ./...
