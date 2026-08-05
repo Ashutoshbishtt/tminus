@@ -22,6 +22,13 @@ func clearEnv(t *testing.T) {
 		"TMINUS_REDIS_ADDR",
 		"TMINUS_KAFKA_BROKERS",
 		"TMINUS_RABBIT_URL",
+		"TMINUS_POSTGRES_MAX_CONNS",
+		"TMINUS_POSTGRES_MIN_CONNS",
+		"TMINUS_POSTGRES_CONNECT_TIMEOUT",
+		"TMINUS_POSTGRES_STATEMENT_TIMEOUT",
+		"TMINUS_POSTGRES_LOCK_TIMEOUT",
+		"TMINUS_POSTGRES_MAX_CONN_LIFETIME",
+		"TMINUS_POSTGRES_MAX_CONN_IDLE_TIME",
 	} {
 		t.Setenv(key, "")
 	}
@@ -50,6 +57,11 @@ func TestLoadDefaults(t *testing.T) {
 		{"http addr", cfg.HTTPAddr, ":8000"},
 		{"redis addr", cfg.RedisAddr, "localhost:6379"},
 		{"kafka brokers", len(cfg.KafkaBrokers), 1},
+		{"pool max conns", cfg.Postgres.MaxConns, int32(10)},
+		{"pool min conns", cfg.Postgres.MinConns, int32(2)},
+		{"connect timeout", cfg.Postgres.ConnectTimeout, 5 * time.Second},
+		{"statement timeout", cfg.Postgres.StatementTimeout, 30 * time.Second},
+		{"lock timeout", cfg.Postgres.LockTimeout, 5 * time.Second},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -71,6 +83,11 @@ func TestLoadRejectsBadSettings(t *testing.T) {
 		{"postgres url with the wrong scheme", "TMINUS_POSTGRES_URL", "mysql://tminus@localhost:3306/tminus"},
 		{"rabbit url with the wrong scheme", "TMINUS_RABBIT_URL", "http://localhost:5672"},
 		{"kafka brokers set to nothing", "TMINUS_KAFKA_BROKERS", ","},
+		{"pool size that is not a number", "TMINUS_POSTGRES_MAX_CONNS", "lots"},
+		{"pool size of zero", "TMINUS_POSTGRES_MAX_CONNS", "0"},
+		{"negative pool size", "TMINUS_POSTGRES_MAX_CONNS", "-3"},
+		{"connect timeout that is not a duration", "TMINUS_POSTGRES_CONNECT_TIMEOUT", "quickly"},
+		{"statement timeout of zero", "TMINUS_POSTGRES_STATEMENT_TIMEOUT", "0s"},
 	}
 
 	for _, tt := range tests {
@@ -143,6 +160,24 @@ func TestPasswordsAreNeverLogged(t *testing.T) {
 	// The rest of the URL should survive, otherwise the log line is useless.
 	if !strings.Contains(logged, "localhost:5432") {
 		t.Errorf("redaction removed too much, host is missing: %s", logged)
+	}
+}
+
+func TestPoolMinimumCannotExceedMaximum(t *testing.T) {
+	// pgxpool rejects this at connect time anyway, but then the message comes out
+	// of a library. Catching it here names both variables.
+	clearEnv(t)
+	t.Setenv("TMINUS_POSTGRES_MAX_CONNS", "4")
+	t.Setenv("TMINUS_POSTGRES_MIN_CONNS", "9")
+
+	_, err := Load("api")
+	if err == nil {
+		t.Fatal("a minimum larger than the maximum was accepted")
+	}
+	for _, want := range []string{"TMINUS_POSTGRES_MIN_CONNS", "TMINUS_POSTGRES_MAX_CONNS"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not mention %s: %v", want, err)
+		}
 	}
 }
 
