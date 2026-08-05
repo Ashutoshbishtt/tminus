@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -37,6 +38,23 @@ type Config struct {
 	RedisAddr    string
 	KafkaBrokers []string
 	RabbitURL    string
+
+	Postgres PostgresPool
+}
+
+// PostgresPool is how much of the database one service may use. Postgres allows
+// 100 connections and five services share them, so each takes a slice rather
+// than opening whatever it likes.
+type PostgresPool struct {
+	MaxConns int32
+	MinConns int32
+
+	ConnectTimeout   time.Duration
+	StatementTimeout time.Duration
+	LockTimeout      time.Duration
+
+	MaxConnLifetime time.Duration
+	MaxConnIdleTime time.Duration
 }
 
 // Load reads the settings for a service and checks them. It returns an error
@@ -70,6 +88,12 @@ func Load(service string) (Config, error) {
 	}
 	cfg.ShutdownTimeout = timeout
 
+	pool, err := loadPostgresPool()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Postgres = pool
+
 	if err := cfg.validate(); err != nil {
 		return Config{}, err
 	}
@@ -99,7 +123,39 @@ func (c Config) validate() error {
 	if err := checkURL("TMINUS_POSTGRES_URL", c.PostgresURL, "postgres", "postgresql"); err != nil {
 		return err
 	}
+	if err := c.Postgres.validate(); err != nil {
+		return err
+	}
 	return checkURL("TMINUS_RABBIT_URL", c.RabbitURL, "amqp", "amqps")
+}
+
+func (p PostgresPool) validate() error {
+	if p.MaxConns < 1 {
+		return fmt.Errorf("TMINUS_POSTGRES_MAX_CONNS: must be at least 1, got %d", p.MaxConns)
+	}
+	if p.MinConns < 0 {
+		return fmt.Errorf("TMINUS_POSTGRES_MIN_CONNS: must not be negative, got %d", p.MinConns)
+	}
+	// pgxpool rejects this at connect time anyway, but then the message comes out
+	// of a library instead of naming the two variables that disagree.
+	if p.MinConns > p.MaxConns {
+		return fmt.Errorf("TMINUS_POSTGRES_MIN_CONNS (%d) must not exceed TMINUS_POSTGRES_MAX_CONNS (%d)", p.MinConns, p.MaxConns)
+	}
+	for _, d := range []struct {
+		key string
+		val time.Duration
+	}{
+		{"TMINUS_POSTGRES_CONNECT_TIMEOUT", p.ConnectTimeout},
+		{"TMINUS_POSTGRES_STATEMENT_TIMEOUT", p.StatementTimeout},
+		{"TMINUS_POSTGRES_LOCK_TIMEOUT", p.LockTimeout},
+		{"TMINUS_POSTGRES_MAX_CONN_LIFETIME", p.MaxConnLifetime},
+		{"TMINUS_POSTGRES_MAX_CONN_IDLE_TIME", p.MaxConnIdleTime},
+	} {
+		if d.val <= 0 {
+			return fmt.Errorf("%s: must be positive, got %s", d.key, d.val)
+		}
+	}
+	return nil
 }
 
 // LogValue lets a whole Config be logged in one go without leaking passwords.
@@ -116,6 +172,12 @@ func (c Config) LogValue() slog.Value {
 		slog.String("redis", c.RedisAddr),
 		slog.String("kafka", strings.Join(c.KafkaBrokers, ",")),
 		slog.String("rabbit", redact(c.RabbitURL)),
+		slog.Group("pg_pool",
+			slog.Int("max_conns", int(c.Postgres.MaxConns)),
+			slog.Int("min_conns", int(c.Postgres.MinConns)),
+			slog.String("connect_timeout", c.Postgres.ConnectTimeout.String()),
+			slog.String("statement_timeout", c.Postgres.StatementTimeout.String()),
+		),
 	)
 }
 
@@ -129,6 +191,54 @@ func env(key, fallback string) string {
 		}
 	}
 	return fallback
+}
+
+// loadPostgresPool reads the pool settings. The defaults are worked out in
+// learning/notes/connection-pool.md: 100 connections in Postgres, five services
+// sharing them, so 10 each leaves room for psql and a migration run.
+func loadPostgresPool() (PostgresPool, error) {
+	var p PostgresPool
+	var err error
+
+	if p.MaxConns, err = envInt32("TMINUS_POSTGRES_MAX_CONNS", 10); err != nil {
+		return p, err
+	}
+	if p.MinConns, err = envInt32("TMINUS_POSTGRES_MIN_CONNS", 2); err != nil {
+		return p, err
+	}
+	if p.ConnectTimeout, err = envDuration("TMINUS_POSTGRES_CONNECT_TIMEOUT", "5s"); err != nil {
+		return p, err
+	}
+	if p.StatementTimeout, err = envDuration("TMINUS_POSTGRES_STATEMENT_TIMEOUT", "30s"); err != nil {
+		return p, err
+	}
+	if p.LockTimeout, err = envDuration("TMINUS_POSTGRES_LOCK_TIMEOUT", "5s"); err != nil {
+		return p, err
+	}
+	if p.MaxConnLifetime, err = envDuration("TMINUS_POSTGRES_MAX_CONN_LIFETIME", "1h"); err != nil {
+		return p, err
+	}
+	if p.MaxConnIdleTime, err = envDuration("TMINUS_POSTGRES_MAX_CONN_IDLE_TIME", "30m"); err != nil {
+		return p, err
+	}
+	return p, nil
+}
+
+func envDuration(key, fallback string) (time.Duration, error) {
+	d, err := time.ParseDuration(env(key, fallback))
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	return d, nil
+}
+
+func envInt32(key string, fallback int32) (int32, error) {
+	raw := env(key, strconv.FormatInt(int64(fallback), 10))
+	n, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("%s: want a whole number, got %q", key, raw)
+	}
+	return int32(n), nil
 }
 
 func parseLevel(s string) (slog.Level, error) {

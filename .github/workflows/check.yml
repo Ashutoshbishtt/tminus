@@ -11,6 +11,25 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+
+    # A real Postgres, because the db tests skip themselves without one and would
+    # pass while proving nothing. Same image and credentials as docker-compose.yml
+    # so the defaults find it with no configuration.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: tminus
+          POSTGRES_PASSWORD: tminus
+          POSTGRES_DB: tminus
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tminus -d tminus"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
 
